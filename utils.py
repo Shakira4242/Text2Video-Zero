@@ -12,11 +12,13 @@ from PIL import Image
 from annotator.util import resize_image, HWC3
 from annotator.canny import CannyDetector
 from annotator.openpose import OpenposeDetector
+from annotator.depth import DepthDetector
 import decord
 # decord.bridge.set_bridge('torch')
 
 apply_canny = CannyDetector()
 apply_openpose = OpenposeDetector()
+apply_depth = DepthDetector()
 
 
 def add_watermark(image, watermark_path, wm_rel_size=1/16, boundary=5):
@@ -48,6 +50,17 @@ def pre_process_canny(input_video, low_threshold=100, high_threshold=200):
     for frame in input_video:
         img = rearrange(frame, 'c h w -> h w c').cpu().numpy().astype(np.uint8)
         detected_map = apply_canny(img, low_threshold, high_threshold)
+        detected_map = HWC3(detected_map)
+        detected_maps.append(detected_map[None])
+    detected_maps = np.concatenate(detected_maps)
+    control = torch.from_numpy(detected_maps.copy()).float() / 255.0
+    return rearrange(control, 'f h w c -> f c h w')
+
+def pre_process_depth(input_video):
+    detected_maps = []
+    for frame in input_video:
+        img = rearrange(frame, 'c h w -> h w c').cpu().numpy().astype(np.uint8)
+        detected_map = apply_depth(img)
         detected_map = HWC3(detected_map)
         detected_maps.append(detected_map[None])
     detected_maps = np.concatenate(detected_maps)

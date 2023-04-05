@@ -20,6 +20,7 @@ class ModelType(Enum):
     ControlNetCanny = 3,
     ControlNetCannyDB = 4,
     ControlNetPose = 5,
+    MultiControlNet = 6,
 
 
 class Model:
@@ -33,6 +34,7 @@ class Model:
             ModelType.ControlNetCanny: StableDiffusionControlNetPipeline,
             ModelType.ControlNetCannyDB: StableDiffusionControlNetPipeline,
             ModelType.ControlNetPose: StableDiffusionControlNetPipeline,
+            ModelType.MultiControlNet: StableDiffusionControlNetPipeline,
         }
         self.controlnet_attn_proc = utils.CrossFrameAttnProcessor(
             unet_chunk_size=2)
@@ -152,14 +154,15 @@ class Model:
 
         video, fps = utils.prepare_video(
             video_path, resolution, self.device, self.dtype, False)
-        control = utils.pre_process_canny(
+        controlnet = utils.pre_process_canny(
             video, low_threshold, high_threshold).to(self.device).to(self.dtype)
+
         f, _, h, w = video.shape
         self.generator.manual_seed(seed)
         latents = torch.randn((1, 4, h//8, w//8), dtype=self.dtype,
                               device=self.device, generator=self.generator)
         latents = latents.repeat(f, 1, 1, 1)
-        result = self.inference(image=control,
+        result = self.inference(image=controlnet,
                                 prompt=prompt + ', ' + added_prompt,
                                 height=h,
                                 width=w,
@@ -175,6 +178,76 @@ class Model:
                                 chunk_size=chunk_size,
                                 )
         return utils.create_video(result, fps, path=save_path, watermark=gradio_utils.logo_name_to_path(watermark))
+
+    def process_multi_controlnet(self,
+                                 video_path,
+                                 prompt,
+                                 chunk_size=8,
+                                 watermark='Picsart AI Research',
+                                 num_inference_steps=20,
+                                 controlnet_conditioning_scale=1.0,
+                                 guidance_scale=9.0,
+                                 seed=42,
+                                 eta=0.0,
+                                 low_threshold=100,
+                                 high_threshold=200,
+                                 resolution=512,
+                                 use_cf_attn=True,
+                                 save_path=None):
+        
+        video_path = gradio_utils.edge_path_to_video_path(video_path)
+
+        if self.model_type != ModelType.ControlNetCanny:
+            controlnet = [
+                ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-canny"),
+                ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-depth"),
+            ]
+
+            self.set_model(ModelType.ControlNetCanny, model_id="runwayml/stable-diffusion-v1-5", controlnet=controlnet)
+
+            self.pipe.scheduler = DDIMScheduler.from_config(
+                self.pipe.scheduler.config)
+            if use_cf_attn:
+                self.pipe.unet.set_attn_processor(
+                    processor=self.controlnet_attn_proc)
+                self.pipe.controlnet.set_attn_processor(
+                    processor=self.controlnet_attn_proc)
+
+        added_prompt = 'best quality, extremely detailed'
+        negative_prompts = 'longbody, lowres, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality'
+
+        video, fps = utils.prepare_video(
+            video_path, resolution, self.device, self.dtype, False)
+
+        canny_image = utils.pre_process_canny(
+            video, low_threshold, high_threshold).to(self.device).to(self.dtype)
+            
+        depth_image = utils.pre_process_depth(video).to(self.device).to(self.dtype)
+
+        images = [canny_image, depth_image]
+        f, _, h, w = video.shape
+        self.generator.manual_seed(seed)
+        latents = torch.randn((1, 4, h//8, w//8), dtype=self.dtype,
+                              device=self.device, generator=self.generator)
+        latents = latents.repeat(f, 1, 1, 1)
+        result = self.inference(image=images,
+                                prompt=prompt + ', ' + added_prompt,
+                                height=h,
+                                width=w,
+                                negative_prompt=negative_prompts,
+                                num_inference_steps=num_inference_steps,
+                                guidance_scale=guidance_scale,
+                                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                                eta=eta,
+                                latents=latents,
+                                seed=seed,
+                                output_type='numpy',
+                                split_to_chunks=True,
+                                chunk_size=chunk_size,
+                                )
+        return utils.create_video(result, fps, path=save_path, watermark=gradio_utils.logo_name_to_path(watermark))
+
+
 
     def process_controlnet_pose(self,
                                 video_path,
@@ -255,8 +328,10 @@ class Model:
         video_path = gradio_utils.get_video_from_canny_selection(video_path)
         # Load db and controlnet weights
         if 'db_path' not in self.states or db_path != self.states['db_path']:
-            controlnet = ControlNetModel.from_pretrained(
-                "lllyasviel/sd-controlnet-canny")
+            controlnet = [
+                ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-canny", torch_dtype=torch.float32),
+                ControlNetModel.from_pretrained("lllyasviel/sd-controlnet-depth", torch_dtype=torch.float16),
+            ]
             self.set_model(ModelType.ControlNetCannyDB,
                            model_id=db_path, controlnet=controlnet)
             self.pipe.scheduler = DDIMScheduler.from_config(
